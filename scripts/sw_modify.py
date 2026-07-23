@@ -1,43 +1,51 @@
 """
-SolidWorks parameter modifier - called by Hermes via terminal.
+SolidWorks 参数修改器 (Parameter Modifier)
+通过 SolidWorks COM API 修改零件参数，支持方程式联动和多种输出格式。
 
-Usage:
-    python sw_modify.py <SLDPRT_PATH> <PARAM=VAL> [PARAM=VAL...] [options]
+调用方式:
+    python sw_modify.py <SLDPRT路径> <参数=值> [参数=值...] [选项]
 
-Options:
-    --step <OUTPUT>        Export STEP after modification
-    --save-as <PATH>       Save modified part as a new SLDPRT (original unchanged)
-    --list                 List all parameters and equations
-    --rollback             Restore to baseline snapshot
-    --new-snapshot         Save current state as new baseline
-    --batch <JSON_FILE>    Batch modify: read variants from JSON, output multiple files
+选项:
+    --step <输出路径>      修改后导出 STEP 文件
+    --save-as <路径>       另存为新 SLDPRT，不覆盖原件
+    --drawing              同时生成二维工程图 PDF（A4 三视图）
+    --list                 列出所有方程式和尺寸
+    --rollback             回退到最近一次快照
+    --new-snapshot         保存当前状态为新的回退基线
+    --batch <JSON文件>     批量模式：从 JSON 配置读取多组参数，输出多个变体
 
-Examples:
-    # Modify and overwrite original
-    python sw_modify.py "C:\\parts\\part.SLDPRT" "L=120" --step "C:\\output\\mod.STEP"
+示例:
+    # 修改参数，另存新文件 + STEP + PDF图纸
+    python sw_modify.py "part.SLDPRT" "L=120" "N1=3" --save-as "output/v1.SLDPRT" --step "output/v1.STEP" --drawing
 
-    # Modify and save as new file (original unchanged)
-    python sw_modify.py "C:\\parts\\part.SLDPRT" "L=120" --save-as "C:\\output\\part-L120.SLDPRT" --step "C:\\output\\part-L120.STEP"
+    # 批量生成变体
+    python sw_modify.py "base.SLDPRT" --batch "batch_config.json"
 
-    # Batch: generate multiple variants from a JSON config
-    python sw_modify.py "C:\\parts\\part.SLDPRT" --batch "C:\\parts\\batch_config.json"
+核心设计:
+    - 三级参数匹配：方程式全局变量 > 精确尺寸名 > 短名模糊匹配（"L" -> "L@凸台-拉伸1@PartName"）
+    - 修改方程式时自动保留单引号后的中文备注（如 '胶面边距A）
+    - pywin32 COM 动态调度：注意属性不加括号（GetTitle 不是 GetTitle()）
 """
 import sys
 import os
 import json
 import time
-import win32com.client
+import win32com.client  # pip install pywin32
 
-# SolidWorks constants
-swDocPART = 1
-swOpenDocOptions_Silent = 1
+# === SolidWorks 文档类型常量 ===
+swDocPART = 1          # 零件文档
+# swOpenDocOptions_Silent = 1  # 静默打开（不显示对话框）
 
-# Snapshot directory (next to the SLDPRT)
+# 快照存储目录（与 SLDPRT 同目录下的隐藏文件夹）
 SNAPSHOT_DIRNAME = ".sw_snapshots"
 
 
 def _snapshot_path(sldprt_path):
-    """Return the snapshot file path for a given SLDPRT."""
+    """返回指定 SLDPRT 的快照文件路径。
+    
+    快照存储在 {SLDPRT所在目录}/.sw_snapshots/{零件名}_last.json
+    用于 --rollback 时恢复参数。
+    """
     d = os.path.dirname(sldprt_path)
     name = os.path.splitext(os.path.basename(sldprt_path))[0]
     snap_dir = os.path.join(d, SNAPSHOT_DIRNAME)
@@ -202,7 +210,11 @@ def rollback(sw, sldprt_path, step_output=None):
 
 
 def _open_model(sw, sldprt_path):
-    """Open a SLDPRT and return the model object."""
+    """打开 SLDPRT 并返回 model 对象。
+    
+    pywin32 坑：不能用 OpenDoc6（ByRef 参数类型不匹配），改用 OpenDoc。
+    始终用返回的 model 对象，不用 sw.ActiveDoc（SW 可能已打开其他文件）。
+    """
     model = sw.OpenDoc(sldprt_path, swDocPART)
     if model is None:
         try:
@@ -218,7 +230,12 @@ def _open_model(sw, sldprt_path):
 
 
 def _get_equation_names(model):
-    """Return set of global variable names from equation manager."""
+    """提取方程式管理器中所有全局变量名（如 L, A, C, N1, F, Q）。
+    
+    SolidWorks 方程式格式: "变量名"= 值'中文备注
+    全局变量如 "A"= 20'胶面边距A，尺寸链接如 "D1@特征"="A"
+    只提取 GlobalVariable(i) 为 True 的。
+    """
     names = set()
     try:
         eq_mgr = model.GetEquationMgr
@@ -234,7 +251,11 @@ def _get_equation_names(model):
 
 
 def _build_dim_name_map(model):
-    """Build a map of short names -> full dimension names for fuzzy matching."""
+    """构建尺寸短名 -> 全名的映射表，实现模糊匹配。
+    
+    SW 返回全名: "L@凸台-拉伸1@PartName.Part"
+    短名映射: "L@凸台-拉伸1" 和 "L" 都能匹配到全名
+    """
     dim_map = {}
     feat = model.FirstFeature
     while feat is not None:
@@ -415,11 +436,12 @@ def batch_modify(sw, sldprt_path, batch_json_path):
         print(f"  {status_icon} {r['name']}: {r['status']}")
 
 
-def modify_and_export(sw, sldprt_path, changes, step_output=None, save_as=None):
+def modify_and_export(sw, sldprt_path, changes, step_output=None, save_as=None, make_drawing=False):
     """Modify dimensions/equations, rebuild, optionally export STEP / save as new SLDPRT.
     
     If save_as is specified, the modified part is saved as a new SLDPRT file
     and the original file is left unchanged.
+    If make_drawing is True, also generates a 2D engineering drawing PDF.
     """
     model = _open_model(sw, sldprt_path)
     title = model.GetTitle
@@ -548,7 +570,84 @@ def modify_and_export(sw, sldprt_path, changes, step_output=None, save_as=None):
         else:
             print("STEP export FAILED")
 
+    # Generate drawing PDF if requested
+    if make_drawing:
+        model_path = save_as if save_as else sldprt_path
+        pdf_path = model_path.replace(".SLDPRT", ".pdf")
+        generate_drawing(sw, model_path, pdf_path)
+
     print("Done.")
+
+
+def _find_drawing_template():
+    """Find an A4 drawing template file."""
+    import glob
+    # Search SolidWorks template directories
+    search_paths = [
+        r"C:\ProgramData\SolidWorks\SOLIDWORKS 20*\templates\gb_a4*.drwdot",
+        r"C:\ProgramData\SolidWorks\SOLIDWORKS 20*\templates\*.drwdot",
+    ]
+    for pattern in search_paths:
+        matches = glob.glob(pattern)
+        if matches:
+            # Prefer A4
+            a4 = [m for m in matches if 'a4' in m.lower() or 'A4' in m]
+            return (a4 or matches)[0]
+    return None
+
+
+def generate_drawing(sw, sldprt_path, pdf_path):
+    """Create an engineering drawing with standard views and export as PDF."""
+    template = _find_drawing_template()
+    if not template:
+        print("Drawing: No template found, skipping.")
+        return
+    
+    print(f"\n--- 生成工程图 ---")
+    print(f"模板: {template}")
+    
+    try:
+        drawing = sw.NewDocument(template, 0, 0, 0)
+        title = drawing.GetTitle
+        print(f"创建: {title}")
+        
+        # Insert standard views
+        views_ok = False
+        try:
+            drawing.Create3rdAngleViews2(sldprt_path)
+            views_ok = True
+            print("三视图已插入")
+        except Exception:
+            pass
+        
+        if not views_ok:
+            # Manual view insertion
+            for vname, x, y in [("*Front", 0.07, 0.14), ("*Top", 0.07, 0.08), ("*Isometric", 0.15, 0.08)]:
+                try:
+                    drawing.CreateDrawViewFromModelView3(sldprt_path, vname, x, y, 0)
+                except:
+                    pass
+            print("视图已插入(手动)")
+        
+        # Export PDF
+        try:
+            success = drawing.SaveAs(pdf_path)
+        except Exception:
+            success = drawing.SaveAs3(pdf_path, 0, 0)
+        
+        if success:
+            print(f"✅ PDF图纸: {pdf_path}")
+        else:
+            print("PDF导出失败")
+        
+        # Close the drawing
+        try:
+            sw.CloseDoc(title)
+        except:
+            pass
+            
+    except Exception as e:
+        print(f"工程图生成失败: {e}")
 
 
 if __name__ == "__main__":
@@ -562,6 +661,7 @@ if __name__ == "__main__":
     step_output = None
     save_as = None
     batch_file = None
+    make_drawing = False
     list_only = False
     do_rollback = False
     new_snapshot = False
@@ -577,6 +677,9 @@ if __name__ == "__main__":
         elif args[i] == "--batch":
             batch_file = args[i + 1]
             i += 2
+        elif args[i] == "--drawing":
+            make_drawing = True
+            i += 1
         elif args[i] == "--list":
             list_only = True
             i += 1
@@ -609,6 +712,6 @@ if __name__ == "__main__":
     elif batch_file:
         batch_modify(sw, sldprt_path, batch_file)
     elif changes:
-        modify_and_export(sw, sldprt_path, changes, step_output, save_as)
+        modify_and_export(sw, sldprt_path, changes, step_output, save_as, make_drawing)
     else:
         print("No changes, --list, --rollback, --new-snapshot, or --batch specified.")
