@@ -134,6 +134,60 @@ Modify equation global variable (e.g. change total length L=120):
 python scripts/sw_modify.py "C:\parts\part.SLDPRT" "L=120" --step "C:\parts\output\modified.STEP"
 ```
 
+Rollback to baseline (undo all modifications since last --new-snapshot):
+```
+python scripts/sw_modify.py "C:\parts\part.SLDPRT" --rollback
+```
+
+Accept current state as new baseline (clears rollback history):
+```
+python scripts/sw_modify.py "C:\parts\part.SLDPRT" --new-snapshot
+```
+
+## Rollback System
+
+Every modification is guarded by a snapshot system:
+
+1. **First modification**: Automatically saves a snapshot of all equation values + dimension values to `.sw_snapshots/<partname>_last.json`
+2. **Subsequent modifications**: Snapshot is preserved - you can modify multiple times and still rollback to the original state
+3. **`--rollback`**: Restores all equations and dimensions from the snapshot, rebuilds the model, saves SLDPRT
+4. **`--new-snapshot`**: Saves current state as the new baseline (use when you're happy with the changes and want to start fresh)
+
+```
+用户: "A 改成 30"        → 修改 A=30, 快照保存原始值(A=25)
+用户: "C 也改成 20"       → 修改 C=20, 快照不变
+用户: "不对，回退"        → --rollback, 恢复 A=25 C=原始值
+用户: "这次对了，继续"     → --new-snapshot, 当前状态成为新基线
+```
+
+## Save-As Mode (Non-Destructive)
+
+Use `--save-as` to save the modified part as a **new SLDPRT file**, leaving the original unchanged:
+
+```
+python scripts/sw_modify.py "part.SLDPRT" "L=120" --save-as "output/part-L120.SLDPRT" --step "output/part-L120.STEP"
+```
+
+This is ideal for generating variants without corrupting the master part file.
+
+## Batch Mode
+
+Use `--batch` to generate multiple variants from a single JSON config file:
+
+```json
+[
+  {"name": "标准款-L100-N5", "changes": {"L": 100, "N1": 5}, "step": true},
+  {"name": "加长款-L120-N5", "changes": {"L": 120, "N1": 5}, "step": true},
+  {"name": "短款-L80-N3",   "changes": {"L": 80,  "N1": 3}, "step": true}
+]
+```
+
+```
+python scripts/sw_modify.py "part.SLDPRT" --batch "batch_config.json"
+```
+
+Each variant is saved as `<output>/<name>.SLDPRT` + `<output>/<name>.STEP`. The original file is never modified.
+
 ## Equation-Aware Workflow
 
 Some parts use SolidWorks **equations** (global variables) to drive dimensions. When `params_labeled.json` has an `equations` section:
