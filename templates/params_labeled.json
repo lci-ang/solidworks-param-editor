@@ -1,0 +1,11 @@
+{
+  "part_name": "FD7111503 后吸（胶长55.5）",
+  "sldprt_path": "C:\\path\\to\\FD7111503 后吸（胶长55.5）.SLDPRT",
+  "output_dir": "C:\\path\\to\\output",
+  "parameters": {
+    "D1@Sketch1":       { "value": 50, "label": "整体长度" },
+    "D2@Sketch1":       { "value": 30, "label": "整体宽度" },
+    "D1@Boss-Extrude1": { "value": 15, "label": "壳体高度" },
+    "D1@Hole1":         { "value": 3,  "label": "孔径" }
+  }
+}
