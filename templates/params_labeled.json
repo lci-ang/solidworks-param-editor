@@ -1,6 +1,6 @@
 {
-  "part_name": "FD7111503 后吸（胶长55.5）",
-  "sldprt_path": "C:\\path\\to\\FD7111503 后吸（胶长55.5）.SLDPRT",
+  "part_name": "MyPart",
+  "sldprt_path": "C:\\path\\to\\MyPart.SLDPRT",
   "output_dir": "C:\\path\\to\\output",
   "parameters": {
     "D1@Sketch1":       { "value": 50, "label": "整体长度" },
